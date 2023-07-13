@@ -24,9 +24,10 @@ struct Stuff {
 	int32_t    Err;
 	int32_t    Found;
 	int32_t    Limit;        // once we get here, attempt to further mods
-	uint32_t    Seed;    
-	int32_t    Scores[10];
-        int32_t    Out[10][36];
+	uint32_t    Seed;
+	int32_t    Scores[N];
+        int32_t    Out[N][36];
+	int32_t    BOI;
 };
 // This is allocated in DEVICE_LOCAL memory, and is not shared with host.
 // This is much to access faster from the shader, especially if the GPU is in a PCIx1 slot.
@@ -175,6 +176,7 @@ public:
 	runCommandBuffer(); // does initializaation
 	p->Init = 0;  // done with init
 
+	uint64_t init2delay = 0;
 	int best = 0;
 	char sq[100];
 	sq[0] = 0;
@@ -184,6 +186,7 @@ public:
 		p->Seed = lrand48();
 		p->Err = 0;
 		p->Found = 0;
+		init2delay++;
 
 		struct timeval t1, t2;
 		gettimeofday(&t1, NULL);
@@ -198,6 +201,11 @@ public:
 			printf("%d %f -- b: %d %s\n", i, elapsedTime, best, sq);
 		}
 		if (p->Found > 0) {
+			int maxf = 0;
+			p->BOI = 0;
+			if (init2delay > 10000) {
+				p->Init = 2;
+			}
 			for (int f = 0; f < p->Found; f++) {
 				if (p->Scores[f] > best) {
 					best = p->Scores[f];
@@ -205,11 +213,23 @@ public:
 						sprintf(sq+j, "%d", p->Out[f][j]);
 					}
 				}
-				printf("%d: %d --- ", f, p->Scores[f]);
-				for (int j = 0; j < 36; j++) {
-					printf("%d,", p->Out[f][j]);
+		
+				if (p->Scores[f] > maxf) {
+					maxf = p->Scores[f];
+					p->BOI = f;
 				}
-				printf("\n");
+			}
+			printf("%d: %d --- ", p->BOI, p->Scores[p->BOI]);
+			for (int j = 0; j < 36; j++) {
+				printf("%d,", p->Out[p->BOI][j]);
+			}
+			printf("\n");
+	
+			if (p->Init == 2) {
+				printf("running init2\n");
+				runCommandBuffer();
+				p->Init = 0;
+			        init2delay = 0;
 			}
 		}
 	}

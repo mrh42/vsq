@@ -4,7 +4,7 @@
 //#extension GL_ARB_gpu_shader_int64 : enable
 //#extension GL_EXT_debug_printf : enable
 //#extension GL_KHR_shader_subgroup_vote : enable
-//#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
 //#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 //#extension GL_EXT_shader_atomic_int64: enable
@@ -24,8 +24,9 @@ layout(binding = 0) buffer buf
 	int    Found;
 	int    Limit;        // once we get here, attempt to further mods
 	uint   Seed;
-	int    Scores[10];    // last score for each square
-	int    Out[10][36];
+	int    Scores[N];    // last score for each square
+	int    Out[N][36];
+	int    BOI;
 };
 
 
@@ -33,7 +34,7 @@ layout(binding = 0) buffer buf
 // This is much faster to access from the shader, especially if the GPU is in a PCIx1 slot.
 layout(binding = 1) buffer buf2
 {
-	int     Primes[NP];
+	bool     Primes[NP];
 	int     Square[N][36];
 	// hashtable estimator thing...
 	uint    Bits[N][NBits];
@@ -110,7 +111,7 @@ uint64_t cks(uint64_t h) {
 
 // test if n is prime, if so add to counting hash
 void add(uint I, int n) {
-	if (Primes[n] == 0) {
+	if (Primes[n] == false) {
 		return;
 	}
 	uint64_t h64 = cks(uint64_t(n));
@@ -144,9 +145,13 @@ int estimate(uint I) {
 // hash a sequence to produce random numbers
 uint rand() {
 	uint r = atomicAdd(Seed, 1);
-	return uint(cks(uint64_t(r) >> 9));
+	return uint(cks(uint64_t(r) >> 1));
 }
-
+void init2(uint I) {
+	for (int i = 0; i < 36; i++) {
+		Square[I][i] = Out[BOI][i];
+	}
+}
 // called once to set things up
 void init(uint I) {
 		
@@ -157,18 +162,18 @@ void init(uint I) {
 	reset(I);
  
 	if (I == 0) {
-		Primes[0] = 0;
-		Primes[1] = 0;
+		Primes[0] = false;
+		Primes[1] = false;
 		for (int i = 2; i < NP; i += 2) {
-			Primes[i] = 0;
+			Primes[i] = false;
 		}
 		for (int i = 3; i < NP; i += 2) {
-			Primes[i] = 1;
+			Primes[i] = true;
 		}
 		for (int i = 3; i < NPr; i += 2) {
-			if (Primes[i] != 0) {
+			if (Primes[i]) {
 				for (int j = i*i; j < NP; j += i) {
-					Primes[j] = 0;
+					Primes[j] = false;
 				}
 			}
 		}
@@ -406,7 +411,7 @@ int countx(uint I) {
 	a = Square[I][35]; a = a * 10 + Square[I][29]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
 	a = Square[I][35]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
 
-	// we'll just assume it included 2,3,5,7
+	// we'll just assume it included all of 2,3,5,7
 	int e = 4 + estimate(I);
 	return e;
 }
@@ -472,32 +477,38 @@ void main() {
 		init(I);
 		return;
 	}
+	if (Init == 2) {
+		init2(I);
+		return;
+	}
 
-	seed(Seed + uint(cks(uint64_t(I))>>4));
+	seed(Seed + uint(cks(uint64_t(I))>>1));
 
-	uint64_t r = rand();
-	//uint64_t r = cks(uint64_t(Seed*I*17+I));
-	uint cell = uint(r) % 36;
+	if (Init == 0) {
+		uint64_t r = rand();
+		//uint64_t r = cks(uint64_t(Seed*I*17+I));
+		uint cell = uint(r) % 36;
 
-	//uint cell = xorshift() % 36;
+		//uint cell = xorshift() % 36;
 
-	//
-	// Increment a random cell in the square and then score it.
-	//
-	int d = Square[I][cell];
-	d = (d+1) % 10;
-	Square[I][cell] = d;
-	int e = countx(I);
+		//
+		// Increment a random cell in the square and then score it.
+		//
+		int d = Square[I][cell];
+		d = (d+1) % 10;
+		Square[I][cell] = d;
+	}
+
 	
+	int e = countx(I);
 	// if it scores better than the lower limit, report it back to the caller.
 	if (e > Limit) {
 		int o = atomicAdd(Found, 1);
 		// we allocated space for 10 results
-		if (o < 10) {
-			Scores[o] = e;
-			for (int i = 0; i < 36; i++) {
-				Out[o][i] = Square[I][i];
-			}
+		Scores[o] = e;
+		for (int i = 0; i < 36; i++) {
+			Out[o][i] = Square[I][i];
 		}
 	}
+	
 }
