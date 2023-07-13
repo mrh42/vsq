@@ -481,13 +481,18 @@ void main() {
 
 	//uint cell = xorshift() % 36;
 
+	//
+	// Increment a random cell in the square and then score it.
+	//
 	int d = Square[I][cell];
 	d = (d+1) % 10;
-	//d = int(xorshift() % 10);
 	Square[I][cell] = d;
 	int e = countx(I);
+	
+	// if it scores better than the lower limit, report it back to the caller.
 	if (e > Limit) {
 		int o = atomicAdd(Found, 1);
+		// we allocated space for 10 results
 		if (o < 10) {
 			Scores[o] = e;
 			for (int i = 0; i < 36; i++) {
