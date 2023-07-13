@@ -12,7 +12,7 @@
 //
 // total threads to start.  choosen so each call to the gpu is around 50 to 100ms.
 //
-const int N = 1024*32;
+const int N = 1024*64;
 const int NP = 1000000;
 const int NPr = 1000;
 const int NBits = 256;
@@ -176,17 +176,16 @@ public:
 	runCommandBuffer(); // does initializaation
 	p->Init = 0;  // done with init
 
-	uint64_t init2delay = 0;
 	int best = 0;
 	char sq[100];
 	sq[0] = 0;
 	// run a few rounds
+	int init2hold = 0;
 	for (int i = 0; i < 100000000; i++)
 	{
 		p->Seed = lrand48();
 		p->Err = 0;
 		p->Found = 0;
-		init2delay++;
 
 		struct timeval t1, t2;
 		gettimeofday(&t1, NULL);
@@ -199,12 +198,14 @@ public:
 		
 		if ((i % 1000) == 0) {
 			printf("%d %f -- b: %d %s\n", i, elapsedTime, best, sq);
+			init2hold = 0;
 		}
 		if (p->Found > 0) {
 			int maxf = 0;
 			p->BOI = 0;
-			if (init2delay > 10000) {
+			if (init2hold == 0 && p->Found == 1) {
 				p->Init = 2;
+				init2hold = 1;
 			}
 			for (int f = 0; f < p->Found; f++) {
 				if (p->Scores[f] > best) {
@@ -229,7 +230,6 @@ public:
 				printf("running init2\n");
 				runCommandBuffer();
 				p->Init = 0;
-			        init2delay = 0;
 			}
 		}
 	}

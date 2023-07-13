@@ -10,7 +10,7 @@
 //#extension GL_EXT_shader_atomic_int64: enable
 
 // number of squares.
-#define N (1024*32)
+#define N (1024*64)
 #define NP 1000000
 #define NPr 1000
 #define NBits 256   // must be a power of 2
@@ -494,9 +494,12 @@ void main() {
 		//
 		// Increment a random cell in the square and then score it.
 		//
-		int d = Square[I][cell];
-		d = (d+1) % 10;
-		Square[I][cell] = d;
+		//int d = Square[I][cell];
+		//d = (d+1) % 10;
+
+		r = rand();
+		uint d = uint(r) % 10;
+		Square[I][cell] = int(d);
 	}
 
 	
