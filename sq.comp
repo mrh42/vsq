@@ -1,0 +1,487 @@
+#version 460
+// We aren't using any of these, but just in case we want to later...
+//#extension GL_ARB_separate_shader_objects : enable
+//#extension GL_ARB_gpu_shader_int64 : enable
+//#extension GL_EXT_debug_printf : enable
+//#extension GL_KHR_shader_subgroup_vote : enable
+//#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+//#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+//#extension GL_EXT_shader_atomic_int64: enable
+
+// number of squares.
+#define N (1024*32)
+#define NP 1000000
+#define NPr 1000
+#define NBits 256   // must be a power of 2
+
+layout (local_size_x = 64) in;
+
+layout(binding = 0) buffer buf
+{
+	int    Init;
+	int    Err;
+	int    Found;
+	int    Limit;        // once we get here, attempt to further mods
+	uint   Seed;
+	int    Scores[10];    // last score for each square
+	int    Out[10][36];
+};
+
+
+// This is allocated in DEVICE_LOCAL memory, not shared with host.  See CPU code to see how this is allocated.
+// This is much faster to access from the shader, especially if the GPU is in a PCIx1 slot.
+layout(binding = 1) buffer buf2
+{
+	int     Primes[NP];
+	int     Square[N][36];
+	// hashtable estimator thing...
+	uint    Bits[N][NBits];
+	int     Count[N];
+};
+
+const int test[36] = 
+{
+	3,3,3,7,1,3,
+        9,3,6,5,9,9,
+        5,4,1,8,1,1,
+        3,7,3,6,3,1,
+        9,9,1,9,4,3,
+        3,3,2,9,9,9,
+};
+const int maxdigits[36][8] =
+{
+	{5, 0, 5, 0, 5, 0, 0, 0},
+	{4, 1, 5, 0, 4, 0, 1, 0},
+	{3, 2, 5, 0, 3, 0, 2, 0},
+	{2, 3, 5, 0, 2, 0, 3, 0},
+	{1, 4, 5, 0, 1, 0, 4, 0},
+	{0, 5, 5, 0, 0, 0, 5, 0},
+	{5, 0, 4, 1, 4, 0, 0, 1},
+	{4, 1, 4, 1, 4, 1, 1, 1},
+	{3, 2, 4, 1, 3, 1, 2, 1},
+	{2, 3, 4, 1, 2, 1, 3, 1},
+	{1, 4, 4, 1, 1, 1, 4, 1},
+	{0, 5, 4, 1, 0, 1, 4, 0},
+	{5, 0, 3, 2, 3, 0, 0, 2},
+	{4, 1, 3, 2, 3, 1, 1, 2},
+	{3, 2, 3, 2, 3, 2, 2, 2},
+	{2, 3, 3, 2, 2, 2, 3, 2},
+	{1, 4, 3, 2, 1, 2, 3, 1},
+	{0, 5, 3, 2, 0, 2, 3, 0},
+	{5, 0, 2, 3, 2, 0, 0, 3},
+	{4, 1, 2, 3, 2, 1, 1, 3},
+	{3, 2, 2, 3, 2, 2, 2, 3},
+	{2, 3, 2, 3, 2, 3, 2, 2},
+	{1, 4, 2, 3, 1, 3, 2, 1},
+	{0, 5, 2, 3, 0, 3, 2, 0},
+	{5, 0, 1, 4, 1, 0, 0, 4},
+	{4, 1, 1, 4, 1, 1, 1, 4},
+	{3, 2, 1, 4, 1, 2, 1, 3},
+	{2, 3, 1, 4, 1, 3, 1, 2},
+	{1, 4, 1, 4, 1, 4, 1, 1},
+	{0, 5, 1, 4, 0, 4, 1, 0},
+	{5, 0, 0, 5, 0, 0, 0, 5},
+	{4, 1, 0, 5, 0, 1, 0, 4},
+	{3, 2, 0, 5, 0, 2, 0, 3},
+	{2, 3, 0, 5, 0, 3, 0, 2},
+	{1, 4, 0, 5, 0, 4, 0, 1},
+	{0, 5, 0, 5, 0, 5, 0, 0},
+};
+
+const int offsets[8] = { 1, -1, 6, -6, 7, -7, 5, -5};
+
+void reset(uint n) {
+	Count[n] = 0;
+	for (int i = 0; i < NBits; i++) {
+		Bits[n][i] = 0;
+	}
+}
+
+uint64_t cks(uint64_t h) {
+	h ^= h >> 33;
+	h *= 0xff51afd7ed558ccdul;
+	h ^= h >> 33;
+	h *= 0xc4ceb9fe1a85ec53ul;
+	h ^= h >> 33;
+	return h;
+}
+void add(uint I, int n) {
+	if (Primes[n] == 0) {
+		return;
+	}
+	uint64_t h64 = cks(uint64_t(n));
+
+	h64 >>= 1;
+	uint h = uint(h64 & 31);
+	uint bit = h;
+
+	h64 >>= 9;
+	h = uint(h64 & (NBits-1));
+	uint index = h;
+
+	uint mask = 1u << bit;
+
+	if ((Bits[I][index] & mask) == 0) {
+		Count[I] += 1;
+		Bits[I][index] |= mask;
+	}
+}
+
+int estimate(uint I) {
+	//return Count[I];
+	double c = float(Count[I]);
+	double m = float(NBits * 32);
+	double est = m * log(float((m) / (m-c)));
+	return int(est);
+}
+
+uint rand() {
+	uint r = atomicAdd(Seed, 1);
+	return uint(cks(uint64_t(r)));
+}
+
+void init(uint I) {
+		
+	for (int i = 0; i < 36; i++) {
+		Square[I][i] = 1;
+		//Square[I][i] = test[i];
+	}
+	reset(I);
+ 
+	if (I == 0) {
+		Primes[0] = 0;
+		Primes[1] = 0;
+		for (int i = 2; i < NP; i += 2) {
+			Primes[i] = 0;
+		}
+		for (int i = 3; i < NP; i += 2) {
+			Primes[i] = 1;
+		}
+		for (int i = 3; i < NPr; i += 2) {
+			if (Primes[i] != 0) {
+				for (int j = i*i; j < NP; j += i) {
+					Primes[j] = 0;
+				}
+			}
+		}
+	}
+}
+
+int countx(uint I) {
+	reset(I);
+/*	for (int cell = 0; cell < 36; cell++) {
+		int d = Square[I][cell];
+		add(I, d);
+	}
+*/
+	int a;
+a = Square[I][0]; a = a * 10 + Square[I][1]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][0]; a = a * 10 + Square[I][6]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][0]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][1]; a = a * 10 + Square[I][2]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][1]; a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][1]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][1]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][1]; a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][2]; a = a * 10 + Square[I][3]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][2]; a = a * 10 + Square[I][1]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][2]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][2]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][2]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][3]; a = a * 10 + Square[I][4]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][3]; a = a * 10 + Square[I][2]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][3]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][3]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][3]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][4]; a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][4]; a = a * 10 + Square[I][3]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][4]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][4]; a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][4]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][5]; a = a * 10 + Square[I][4]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][5]; a = a * 10 + Square[I][11]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][5]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][6]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][6]; a = a * 10 + Square[I][12]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][6]; a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][6]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][6]; a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][7]; a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][8]; a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][9]; a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][10]; a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][11]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][11]; a = a * 10 + Square[I][17]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][11]; a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][11]; a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][11]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][12]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][12]; a = a * 10 + Square[I][18]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][12]; a = a * 10 + Square[I][6]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][12]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][12]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][13]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][14]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][15]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][16]; a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][17]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][17]; a = a * 10 + Square[I][23]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][17]; a = a * 10 + Square[I][11]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][17]; a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][17]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][18]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][18]; a = a * 10 + Square[I][24]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][18]; a = a * 10 + Square[I][12]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][18]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][18]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][19]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][20]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][21]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][22]; a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][23]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][23]; a = a * 10 + Square[I][29]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][23]; a = a * 10 + Square[I][17]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][23]; a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][23]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][24]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][24]; a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][24]; a = a * 10 + Square[I][18]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][24]; a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][24]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][25]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][31]; add(I, a); 
+a = Square[I][26]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][32]; add(I, a); 
+a = Square[I][27]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][33]; add(I, a); 
+a = Square[I][28]; a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][29]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][29]; a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][29]; a = a * 10 + Square[I][23]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][29]; a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][29]; a = a * 10 + Square[I][34]; add(I, a); 
+a = Square[I][30]; a = a * 10 + Square[I][31]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][30]; a = a * 10 + Square[I][24]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+a = Square[I][30]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][31]; a = a * 10 + Square[I][32]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][31]; a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][31]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][1]; add(I, a); 
+a = Square[I][31]; a = a * 10 + Square[I][24]; add(I, a); 
+a = Square[I][31]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); 
+a = Square[I][32]; a = a * 10 + Square[I][33]; add(I, a); a = a * 10 + Square[I][34]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][32]; a = a * 10 + Square[I][31]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][32]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][8]; add(I, a); a = a * 10 + Square[I][2]; add(I, a); 
+a = Square[I][32]; a = a * 10 + Square[I][25]; add(I, a); a = a * 10 + Square[I][18]; add(I, a); 
+a = Square[I][32]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); 
+a = Square[I][33]; a = a * 10 + Square[I][34]; add(I, a); a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][33]; a = a * 10 + Square[I][32]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][33]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][15]; add(I, a); a = a * 10 + Square[I][9]; add(I, a); a = a * 10 + Square[I][3]; add(I, a); 
+a = Square[I][33]; a = a * 10 + Square[I][26]; add(I, a); a = a * 10 + Square[I][19]; add(I, a); a = a * 10 + Square[I][12]; add(I, a); 
+a = Square[I][33]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); 
+a = Square[I][34]; a = a * 10 + Square[I][35]; add(I, a); 
+a = Square[I][34]; a = a * 10 + Square[I][33]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][34]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][22]; add(I, a); a = a * 10 + Square[I][16]; add(I, a); a = a * 10 + Square[I][10]; add(I, a); a = a * 10 + Square[I][4]; add(I, a); 
+a = Square[I][34]; a = a * 10 + Square[I][27]; add(I, a); a = a * 10 + Square[I][20]; add(I, a); a = a * 10 + Square[I][13]; add(I, a); a = a * 10 + Square[I][6]; add(I, a); 
+a = Square[I][34]; a = a * 10 + Square[I][29]; add(I, a); 
+a = Square[I][35]; a = a * 10 + Square[I][34]; add(I, a); a = a * 10 + Square[I][33]; add(I, a); a = a * 10 + Square[I][32]; add(I, a); a = a * 10 + Square[I][31]; add(I, a); a = a * 10 + Square[I][30]; add(I, a); 
+a = Square[I][35]; a = a * 10 + Square[I][29]; add(I, a); a = a * 10 + Square[I][23]; add(I, a); a = a * 10 + Square[I][17]; add(I, a); a = a * 10 + Square[I][11]; add(I, a); a = a * 10 + Square[I][5]; add(I, a); 
+a = Square[I][35]; a = a * 10 + Square[I][28]; add(I, a); a = a * 10 + Square[I][21]; add(I, a); a = a * 10 + Square[I][14]; add(I, a); a = a * 10 + Square[I][7]; add(I, a); a = a * 10 + Square[I][0]; add(I, a); 
+	int e = 4 + estimate(I);
+	return e;
+}
+
+int count(uint I) {
+	reset(I);
+	for (int cell = 0; cell < 36; cell++) {
+		int d = Square[I][cell];
+		add(I, d);
+		// this is really slow, need to do this differently
+		for (int dir = 0; dir < 8; dir++) {
+			int l = maxdigits[cell][dir];
+			if (l > 0) {
+				int o = cell;
+				int num = Square[I][o];
+				while (l > 0) {
+					o += offsets[dir];
+					num = num * 10 + Square[I][o];
+					add(I, num);
+					l--;
+				}
+			}
+		}
+	}
+	int e = estimate(I);
+	return e;
+}
+
+uint
+    x=123456789,
+    y=362436069,
+    z=521288629,
+    w=88675123,
+    v=886756453;
+/* replace defaults with five random seed values in calling program */
+
+uint xorshift(void)
+{
+    uint t = x^(x>>7);
+    x=y; y=z; z=w; w=v;
+    v=(v^(v<<6))^(t^(t<<13)); 
+    return (y+y+1)*v;
+} 
+
+void seed(uint r)
+{
+	x = r;
+	v = xorshift();
+	w = xorshift();
+	z = xorshift();
+	y = xorshift();
+}
+
+void main() {
+	uint I = gl_GlobalInvocationID.x;
+	if (I >= N) {
+		return;
+	}
+	if (Init == 1) {
+		init(I);
+		return;
+	}
+
+	//seed(Seed + I * 17);
+	seed(Seed + uint(cks(uint64_t(I))>>4));
+	// Non-init.
+	//if (Scores[I] < Limit)
+	if (true)
+	{
+		//uint64_t r = rand();
+		//uint64_t r = cks(uint64_t(Seed*I*17+I));
+		uint cell = xorshift() % 36;
+		//uint cell = uint(r >> 7) % 36;
+		int d = Square[I][cell];
+		d = (d+1) % 10;
+		//d = int(xorshift() % 10);
+		Square[I][cell] = d;
+		int e = countx(I);
+		if (e > Limit) {
+			int o = atomicAdd(Found, 1);
+			if (o < 10) {
+				Scores[o] = e;
+				for (int i = 0; i < 36; i++) {
+					Out[o][i] = Square[I][i];
+				}
+			}
+		}
+	}
+}
