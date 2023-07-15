@@ -16,7 +16,7 @@
 // glslc might produce slightly faster SPIR-V for the Radeon VII
 
 // number of squares.
-#define N (1024*128)
+#define N (1024*48)
 #define NP 1000000
 #define NPr 1000
 #define NBits 128  // must be a power of 2
@@ -159,7 +159,7 @@ uint rand() {
 	return uint(cks(uint64_t(r) >> 1));
 }
 void init2(uint I) {
-	if ((I & 7) == 0) {
+	if ((rand() & 3) == 0) {
 		return;
 	}
 	for (int i = 0; i < 36; i++) {
@@ -356,35 +356,22 @@ void main() {
 		return;
 	}
 
-	seed(Seed + uint(cks(uint64_t(I))>>1));
+//	seed(Seed + uint(cks(uint64_t(I))>>1));
 
-	if (Init == 0) {
-		uint r = rand();
-		//uint64_t r = cks(uint64_t(Seed*I*17+I));
-		uint cell = r % 36;
+	uint r = rand();
+	uint cell = r % 36;
 
-		//uint cell = xorshift() % 36;
-
-		//
-		// Increment a random cell in the square and then score it.
-		//
-		//uint d = Square[I][cell];
-
-		r = rand();
-		uint d = r % 10;
-		Square[I][cell] = d;
-	}
-
+	r = rand();
+	uint d = r % 10;
+	Square[I][cell] = d;
 	
 	int e = count4(I);
 	// if it scores better than the lower limit, report it back to the caller.
 	if (e > Limit) {
 		int o = atomicAdd(Found, 1);
-		// we allocated space for 10 results
 		Scores[o] = e;
 		for (int i = 0; i < 36; i++) {
 			Out[o][i] = Square[I][i];
 		}
 	}
-	
 }

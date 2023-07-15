@@ -12,7 +12,7 @@
 //
 // total threads to start.  choosen so each call to the gpu is around 50 to 100ms.
 //
-const int N = 1024*128;
+const int N = 1024*48;
 const int NP = 1000000;
 const int NPr = 1000;
 const int NBits = 128;
@@ -203,9 +203,10 @@ public:
 		if (p->Found > 0) {
 			int maxf = 0;
 			p->BOI = 0;
-			if (init2hold == 0 && p->Found == 1) {
+			//if (init2hold == 0 && p->Found < 10) {
+			if (init2hold < 18) {
 				p->Init = 2;
-				init2hold = 1;
+				init2hold += 1;
 			}
 			for (int f = 0; f < p->Found; f++) {
 				if (p->Scores[f] > best) {
