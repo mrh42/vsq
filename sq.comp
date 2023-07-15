@@ -9,6 +9,12 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 //#extension GL_EXT_shader_atomic_int64: enable
 
+// compile this file into SPIR-V with:
+//   glslangValidator --target-env vulkan1.3 -V sq.comp
+// or
+//   glslc --target-env=vulkan1.3 sq.comp -o comp.spv
+// glslc might produce slightly faster SPIR-V for the Radeon VII
+
 // number of squares.
 #define N (1024*32)
 #define NP 1000000
@@ -34,7 +40,8 @@ layout(binding = 0) buffer buf
 // This is much faster to access from the shader, especially if the GPU is in a PCIx1 slot.
 layout(binding = 1) buffer buf2
 {
-	bool     Primes[NP];
+	bool     Primes[NP];    // haven't decided which is fast of these two
+	uint     PrimesB[NP/32];
 	uint     Square[N][36];
 	// hashtable estimator thing...
 	uint    Bits[N][NBits];
@@ -111,7 +118,10 @@ uint64_t cks(uint64_t h) {
 
 // test if n is prime, if so add to counting hash
 void add(uint I, uint n) {
-	if (Primes[n] == false) {
+	uint b = 1u << (n%32);
+	uint o = n / 32;
+	//if (Primes[n] == false) {
+	if ((PrimesB[o] & b) == 0) {
 		return;
 	}
 	uint64_t h64 = cks(uint64_t(n));
@@ -180,6 +190,20 @@ void init(uint I) {
 				}
 			}
 		}
+		Primes[2] = true;
+
+		// bit-wise version to save memory, is it faster?
+		for (int i = 0; i < NP/32; i ++) {
+			PrimesB[i] = 0;
+		}
+		for (int i = 0; i < NP; i ++) {
+			if (Primes[i]) {
+				uint b = i % 32;
+				uint o = i / 32;
+				PrimesB[o] |= 1u << b;
+			}
+		}
+		
 	}
 }
 
@@ -190,13 +214,14 @@ int count4(uint I) {
 	for (int i = 0; i < 60; i++) {
 		e[i] = 0;
 	}
-	
+	/* slight speed up, slip and may estimate a couple low 
 	for (int cell = 0; cell < 36; cell++) {
 		uint d = Square[I][cell];
-		add(I, d);
-	}
+	       	add(I, d);
+	} */
 	for (int j = 0; j < 6; j++) {
 		for (int i = 0; i < 6; i++) {
+			// across
 			e[j] = e[j] * 10 + Square[I][i + j * 6];
 			// down
 			e[j+6] = e[j+6] * 10 + Square[I][i*6 + j];

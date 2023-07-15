@@ -33,6 +33,7 @@ struct Stuff {
 // This is much to access faster from the shader, especially if the GPU is in a PCIx1 slot.
 struct Stuff2 {
 	int32_t     Primes[NP];
+	int32_t     PrimesB[NP];
 	uint32_t    Square[N][36];
 	uint32_t    Bits[N][NBits];
 	int32_t     Count[N];
