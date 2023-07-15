@@ -12,10 +12,10 @@
 //
 // total threads to start.  choosen so each call to the gpu is around 50 to 100ms.
 //
-const int N = 1024*64;
+const int N = 1024*32;
 const int NP = 1000000;
 const int NPr = 1000;
-const int NBits = 256;
+const int NBits = 128;
 
 // This is allocated in HOST_VISIBLE_LOCAL memory, and is shared with host.
 // it is somewhat slow, compared to DEVICE_LOCAL memory.
@@ -24,16 +24,16 @@ struct Stuff {
 	int32_t    Err;
 	int32_t    Found;
 	int32_t    Limit;        // once we get here, attempt to further mods
-	uint32_t    Seed;
+	uint32_t   Seed;
 	int32_t    Scores[N];
-        int32_t    Out[N][36];
+        uint32_t   Out[N][36];
 	int32_t    BOI;
 };
 // This is allocated in DEVICE_LOCAL memory, and is not shared with host.
 // This is much to access faster from the shader, especially if the GPU is in a PCIx1 slot.
 struct Stuff2 {
 	int32_t     Primes[NP];
-	int32_t     Square[N][36];
+	uint32_t    Square[N][36];
 	uint32_t    Bits[N][NBits];
 	int32_t     Count[N];
 };
@@ -172,7 +172,7 @@ public:
 	struct Stuff *p = (struct Stuff *) mappedMemory;
 
 	p->Init = 1;
-	p->Limit = 120;
+	p->Limit = 118;
 	runCommandBuffer(); // does initializaation
 	p->Init = 0;  // done with init
 
@@ -222,7 +222,7 @@ public:
 			}
 			printf("%d: %d --- ", p->BOI, p->Scores[p->BOI]);
 			for (int j = 0; j < 36; j++) {
-				printf("%d,", p->Out[p->BOI][j]);
+				printf("%d", p->Out[p->BOI][j]);
 			}
 			printf("\n");
 	
