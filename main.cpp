@@ -12,7 +12,7 @@
 //
 // total threads to start.  choosen so each call to the gpu is around 50 to 100ms.
 //
-const int N = 1024*32;
+const int N = 1024*128;
 const int NP = 1000000;
 const int NPr = 1000;
 const int NBits = 128;
@@ -32,7 +32,6 @@ struct Stuff {
 // This is allocated in DEVICE_LOCAL memory, and is not shared with host.
 // This is much to access faster from the shader, especially if the GPU is in a PCIx1 slot.
 struct Stuff2 {
-	int32_t     Primes[NP];
 	int32_t     PrimesB[NP];
 	uint32_t    Square[N][36];
 	uint32_t    Bits[N][NBits];

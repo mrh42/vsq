@@ -16,7 +16,7 @@
 // glslc might produce slightly faster SPIR-V for the Radeon VII
 
 // number of squares.
-#define N (1024*32)
+#define N (1024*128)
 #define NP 1000000
 #define NPr 1000
 #define NBits 128  // must be a power of 2
@@ -40,7 +40,6 @@ layout(binding = 0) buffer buf
 // This is much faster to access from the shader, especially if the GPU is in a PCIx1 slot.
 layout(binding = 1) buffer buf2
 {
-	bool     Primes[NP];    // haven't decided which is fast of these two
 	uint     PrimesB[NP/32];
 	uint     Square[N][36];
 	// hashtable estimator thing...
@@ -115,13 +114,15 @@ uint64_t cks(uint64_t h) {
 	h ^= h >> 33;
 	return h;
 }
+bool pb(uint n) {
+	uint b = 1u << (n%32);
+	uint o = n / 32;
+	return (PrimesB[o] & b) != 0;
+}
 
 // test if n is prime, if so add to counting hash
 void add(uint I, uint n) {
-	uint b = 1u << (n%32);
-	uint o = n / 32;
-	//if (Primes[n] == false) {
-	if ((PrimesB[o] & b) == 0) {
+	if (!pb(n)) {
 		return;
 	}
 	uint64_t h64 = cks(uint64_t(n));
@@ -165,6 +166,7 @@ void init2(uint I) {
 		Square[I][i] = Out[BOI][i];
 	}
 }
+
 // called once to set things up
 void init(uint I) {
 		
@@ -175,35 +177,21 @@ void init(uint I) {
 	reset(I);
  
 	if (I == 0) {
-		Primes[0] = false;
-		Primes[1] = false;
-		for (int i = 2; i < NP; i += 2) {
-			Primes[i] = false;
-		}
-		for (int i = 3; i < NP; i += 2) {
-			Primes[i] = true;
-		}
-		for (int i = 3; i < NPr; i += 2) {
-			if (Primes[i]) {
-				for (int j = i*i; j < NP; j += i) {
-					Primes[j] = false;
-				}
-			}
-		}
-		Primes[2] = true;
-
-		// bit-wise version to save memory, is it faster?
 		for (int i = 0; i < NP/32; i ++) {
 			PrimesB[i] = 0;
 		}
-		for (int i = 0; i < NP; i ++) {
-			if (Primes[i]) {
-				uint b = i % 32;
-				uint o = i / 32;
-				PrimesB[o] |= 1u << b;
+		
+		for (int i = 3; i < NP; i += 2) {
+			PrimesB[i/32] |= 1u << (i%32);
+		}
+		for (uint i = 3; i < NPr; i += 2) {
+			if (pb(i)) {
+				for (uint j = i*i; j < NP; j += i) {
+					PrimesB[j/32] &= ~(1u << (j%32));
+				}
 			}
 		}
-		
+		PrimesB[0] |= 1u << 2;
 	}
 }
 
