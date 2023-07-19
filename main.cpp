@@ -181,7 +181,7 @@ public:
 	sq[0] = 0;
 	// run a few rounds
 	int init2hold = 0;
-	for (int i = 0; i < 100000000; i++)
+	for (int i = 1; i < 100000000; i++)
 	{
 		p->Seed = lrand48();
 		p->Err = 0;
@@ -190,6 +190,12 @@ public:
 		struct timeval t1, t2;
 		gettimeofday(&t1, NULL);
 
+		if ((i % 50000) == 0) {
+			printf("running init3\n");
+			p->Init = 3;
+			runCommandBuffer();
+			p->Init = 0;
+		}
 		runCommandBuffer();
 
 		gettimeofday(&t2, NULL);
@@ -204,8 +210,10 @@ public:
 			int maxf = 0;
 			p->BOI = 0;
 			//if (init2hold == 0 && p->Found < 10) {
-			if (init2hold < 18) {
-				p->Init = 2;
+			if (init2hold < 30) {
+				if ((init2hold & 3) == 0) {
+					p->Init = 2;
+				}
 				init2hold += 1;
 			}
 			for (int f = 0; f < p->Found; f++) {

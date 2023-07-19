@@ -47,6 +47,9 @@ layout(binding = 1) buffer buf2
 	int     Count[N];
 };
 
+// 178 912839199679761139335932317743311933
+// 177 929389337313994199763901925717167339
+// 175 978779199583934721491731337699975133
 const int test[36] = 
 {
 	3,3,3,7,1,3,
@@ -159,11 +162,16 @@ uint rand() {
 	return uint(cks(uint64_t(r) >> 1));
 }
 void init2(uint I) {
-	if ((rand() & 3) == 0) {
-		return;
+	if ((rand() & 1) == 0) {
+	       	return;
 	}
 	for (int i = 0; i < 36; i++) {
 		Square[I][i] = Out[BOI][i];
+	}
+}
+void init3(uint I) {
+	for (int i = 0; i < 36; i++) {
+		Square[I][i] = rand() % 10;
 	}
 }
 
@@ -347,12 +355,16 @@ void main() {
 	if (I >= N) {
 		return;
 	}
-	if (Init == 1) {
-		init(I);
-		return;
-	}
-	if (Init == 2) {
-		init2(I);
+	if (Init != 0) {
+		if (Init == 1) {
+			init(I);
+		}
+		if (Init == 2) {
+			init2(I);
+		}
+		if (Init == 3) {
+			init3(I);
+		}
 		return;
 	}
 
