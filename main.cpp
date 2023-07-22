@@ -172,7 +172,7 @@ public:
 	struct Stuff *p = (struct Stuff *) mappedMemory;
 
 	p->Init = 1;
-	p->Limit = 118;
+	p->Limit = 145;
 	runCommandBuffer(); // does initializaation
 	p->Init = 0;  // done with init
 
