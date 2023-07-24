@@ -12,10 +12,10 @@
 //
 // total threads to start.  choosen so each call to the gpu is around 50 to 100ms.
 //
-const int N = 1024*48;
+const int N = 1024*32;
 const int NP = 1000000;
 const int NPr = 1000;
-const int NBits = 128;
+const int HS = 256;
 
 // This is allocated in HOST_VISIBLE_LOCAL memory, and is shared with host.
 // it is somewhat slow, compared to DEVICE_LOCAL memory.
@@ -34,7 +34,7 @@ struct Stuff {
 struct Stuff2 {
 	int32_t     PrimesB[NP];
 	uint32_t    Square[N][36];
-	uint32_t    Bits[N][NBits];
+	uint32_t    Hash[N][HS];
 	int32_t     Count[N];
 };
 
@@ -172,7 +172,7 @@ public:
 	struct Stuff *p = (struct Stuff *) mappedMemory;
 
 	p->Init = 1;
-	p->Limit = 145;
+	p->Limit = 138;
 	runCommandBuffer(); // does initializaation
 	p->Init = 0;  // done with init
 
@@ -190,12 +190,6 @@ public:
 		struct timeval t1, t2;
 		gettimeofday(&t1, NULL);
 
-		if ((i % 50000) == 0) {
-			printf("running init3\n");
-			p->Init = 3;
-			runCommandBuffer();
-			p->Init = 0;
-		}
 		runCommandBuffer();
 
 		gettimeofday(&t2, NULL);
@@ -205,16 +199,23 @@ public:
 		if ((i % 1000) == 0) {
 			printf("%d %f -- b: %d %s\n", i, elapsedTime, best, sq);
 			init2hold = 0;
+			p->Init = 0;
 		}
 		if (p->Found > 0) {
 			int maxf = 0;
 			p->BOI = 0;
 			//if (init2hold == 0 && p->Found < 10) {
-			if (init2hold < 30) {
-				if ((init2hold & 3) == 0) {
+			if (init2hold < 52) {
+				if ((init2hold & 3) == 0)
+				{
 					p->Init = 2;
 				}
+			      
 				init2hold += 1;
+			}
+			else
+			{
+				p->Init = 0;
 			}
 			for (int f = 0; f < p->Found; f++) {
 				if (p->Scores[f] > best) {
@@ -229,7 +230,7 @@ public:
 					p->BOI = f;
 				}
 			}
-			printf("%d: %d --- ", p->BOI, p->Scores[p->BOI]);
+			printf("%d: %d --- ", i, p->Scores[p->BOI]);
 			for (int j = 0; j < 36; j++) {
 				printf("%d", p->Out[p->BOI][j]);
 			}
@@ -238,7 +239,7 @@ public:
 			if (p->Init == 2) {
 				printf("running init2\n");
 				runCommandBuffer();
-				p->Init = 0;
+				p->Init = 4;
 			}
 		}
 	}

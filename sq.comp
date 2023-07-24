@@ -16,10 +16,10 @@
 // glslc might produce slightly faster SPIR-V for the Radeon VII
 
 // number of squares.
-#define N (1024*48)
+#define N (1024*32)
 #define NP 1000000
 #define NPr 1000
-#define NBits 128  // must be a power of 2
+#define HS 256  // must be a power of 2
 
 layout (local_size_x = 64) in;
 
@@ -28,7 +28,7 @@ layout(binding = 0) buffer buf
 	int    Init;
 	int    Err;
 	int    Found;
-	int    Limit;        // once we get here, attempt to further mods
+	int    Limit;
 	uint   Seed;
 	int    Scores[N];    // last score for each square
 	uint   Out[N][36];
@@ -43,17 +43,26 @@ layout(binding = 1) buffer buf2
 	uint     PrimesB[NP/32];
 	uint     Square[N][36];
 	// hashtable estimator thing...
-	uint    Bits[N][NBits];
-	int     Count[N];
+	uint     Hash[N][HS];
+	int      Count[N];
 };
-// 183 333199383293922751136131794399397433 
-// 181 337199947933196613715712398399994133
-// 178 912839199679761139335932317743311933
-// 177 929389337313994199763901925717167339
+// 185 333199383293922751136131794399397433
+// 182 331999913739197547768294361313311933
+// 181 391133839733976491217519993299333719
+// 181 337393947933196613715712398399994133
+// 181 996779932713193499785711334637391139
+// 180 934919999233977841145631337199337913
+// 180 337199947933196613715712398399994133
+// 180 917333382193177257196733991499313337
+// 179 339179399833745731136761993319996293
+// 179 332933991499194397785774331633339113
+// 178 932779932713193499785711331631391139
+// 178 937339357193194723183761931499337199
+// 178 937799336599194121179633943733398339
+// 177 912839199679761139335932317743311933
+// 177 992333382193177257196733991499317333
 // 177 339839327194931697157149197333933199
-// 176 931193933893417517770691929349313933
-// 175 978779199583934721491731337699975133
-// 174 313373713873641929779514919631339173
+// 177 391733994199197313125698334799937613
 const int test[36] = 
 {
 	3,3,3,7,1,3,
@@ -145,12 +154,6 @@ const uint dist[36][10] =
 
 const int offsets[8] = { 1, -1, 6, -6, 7, -7, 5, -5};
 
-void reset(uint n) {
-	Count[n] = 0;
-	for (int i = 0; i < NBits; i++) {
-		Bits[n][i] = 0;
-	}
-}
 
 // murmur style hash
 uint64_t cks(uint64_t h) {
@@ -167,6 +170,13 @@ bool pb(uint n) {
 	return (PrimesB[o] & b) != 0;
 }
 
+void reset(uint n) {
+	Count[n] = 0;
+	for (int i = 0; i < HS; i++) {
+		Hash[n][i] = 0;
+	}
+}
+
 // test if n is prime, if so add to counting hash
 void add(uint I, uint n) {
 	if (!pb(n)) {
@@ -175,29 +185,21 @@ void add(uint I, uint n) {
 	uint64_t h64 = cks(uint64_t(n));
 
 	h64 >>= 1;
-	uint h = uint(h64 & 31);
-	uint bit = h;
+	uint index = uint(h64 & (HS-1));
 
-	// index can not in anyway corelate to bit.
-	h64 >>= 9;
-	h = uint(h64 & (NBits-1));
-	uint index = h;
-
-	uint mask = 1u << bit;
-
-	if ((Bits[I][index] & mask) == 0) {
+	while (Hash[I][index] != 0 && Hash[I][index] != n) {
+		index++;
+		index &= (HS-1);
+	}
+	if (Hash[I][index] == 0) {
+		Hash[I][index] = n;
 		Count[I] += 1;
-		Bits[I][index] |= mask;
 	}
 }
 
 // calculate an estimate of how many objects we hashed.
 int estimate(uint I) {
-	//return Count[I];
-	double c = float(Count[I]);
-	double m = float(NBits * 32);
-	double est = m * log(float((m) / (m-c)));
-	return int(est);
+	return Count[I];
 }
 
 // hash a sequence to produce random numbers
@@ -206,12 +208,7 @@ uint rand() {
 	return uint(cks(uint64_t(r) >> 1));
 }
 uint randdig(uint cell) {
-	uint n = rand();
-	if ((n & 63) == 0) {
-		n = rand() % 10;
-		return n;
-	}
-	n = rand() % 100;
+	uint n = rand() % 100;
 	for (uint j = 0; j < 10; j++) {
 		if (n < dist[cell][j]) {
 			return j;
@@ -219,12 +216,14 @@ uint randdig(uint cell) {
 	}
 }
 void init2(uint I) {
-	if ((rand() & 1) == 0) {
+/*	if ((rand() & 3) == 0) {
 	       	return;
-	}
+	} 
+*/
 	for (int i = 0; i < 36; i++) {
 		Square[I][i] = Out[BOI][i];
 	}
+
 }
 void init3(uint I) {
 	for (int i = 0; i < 36; i++) {
@@ -269,11 +268,11 @@ int count4(uint I) {
 	for (int i = 0; i < 60; i++) {
 		e[i] = 0;
 	}
-	/* slight speed up, skip and we may estimate a couple low 
+	
 	for (int cell = 0; cell < 36; cell++) {
 		uint d = Square[I][cell];
 	       	add(I, d);
-	} */
+	}
 	for (int j = 0; j < 6; j++) {
 		for (int i = 0; i < 6; i++) {
 			// across
@@ -414,27 +413,36 @@ void main() {
 	if (I >= N) {
 		return;
 	}
-	if (Init != 0) {
-		if (Init == 1) {
-			init(I);
-		}
-		if (Init == 2) {
-			init2(I);
-		}
-		if (Init == 3) {
-			init3(I);
-		}
+	if (Init == 1) {
+		init(I);
+		return;
+	}
+	if (Init == 2) {
+		init2(I);
+		return;
+	}
+	if (Init == 3) {
+		init3(I);
 		return;
 	}
 
-//	seed(Seed + uint(cks(uint64_t(I))>>1));
+	uint d;
+	uint cell = rand() % 36;
+	if (Init == 4 && (rand() & 63) == 0) {
+	//if ((rand() & 63) == 0) {
+		d = rand() % 10;
+	} else {
+		d = randdig(cell);
+	}
+	if (d == Square[I][cell]) {
+		d = (d + 1) % 10;
+		//d = rand() % 10;
+	}
+	Square[I][cell] = d;
 
-	uint r = rand();
-	uint cell = r % 36;
 
-	Square[I][cell] = randdig(cell);
-	
-	int e = count4(I);
+	//int e = count4(I);
+	int e = count(I);
 	// if it scores better than the lower limit, report it back to the caller.
 	if (e > Limit) {
 		int o = atomicAdd(Found, 1);
